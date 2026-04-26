@@ -5,6 +5,10 @@
 An EMF (electromagnetic field) scanner built with an Cardputer ADV and a single jumper wire as an antenna.
 It detects ambient electrical fields, visualizes signal strength, and identifies mains frequency components (50 Hz / 100 Hz) in real time.
 
+# Quickstart
+a) Using Launcher: Download .bin from [Releases](https://github.com/tinsever/m5-adv-emf-meter/releases) to your Cardputer ADV
+b) Flashing: Using Arduino IDE and code in emf-meter.ino
+
 # What it does
 
 - Uses a floating ADC pin as an antenna
