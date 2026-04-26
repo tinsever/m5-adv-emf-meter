@@ -10,6 +10,8 @@ a) Using Launcher: Download .bin from [Releases](https://github.com/tinsever/m5-
 
 b) Flashing: Using Arduino IDE and code in emf-meter.ino
 
+Then put the jumper wire into G3.
+
 # What it does
 
 - Uses a floating ADC pin as an antenna
