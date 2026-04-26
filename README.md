@@ -1,6 +1,8 @@
 # Cardputer ADV EMF Meter
 
-A EMF (electromagnetic field) scanner built with an Cardputer ADV and a single jumper wire as an antenna.
+<img src="https://github.com/tinsever/m5-adv-emf-meter/blob/main/demo.jpeg?raw=true" width="500">
+
+An EMF (electromagnetic field) scanner built with an Cardputer ADV and a single jumper wire as an antenna.
 It detects ambient electrical fields, visualizes signal strength, and identifies mains frequency components (50 Hz / 100 Hz) in real time.
 
 # What it does
