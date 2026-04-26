@@ -1,2 +1,35 @@
-# m5-adv-emf-meter
-M5 CardPuter ADV-based electromagnetic field scanner using ADC sampling and Goertzel filtering to detect mains frequency (50/100 Hz) and ambient noise.
+# Cardputer ADV EMF Meter
+
+A EMF (electromagnetic field) scanner built with an Cardputer ADV and a single jumper wire as an antenna.
+It detects ambient electrical fields, visualizes signal strength, and identifies mains frequency components (50 Hz / 100 Hz) in real time.
+
+# What it does
+
+- Uses a floating ADC pin as an antenna
+- Detects nearby electrical fields (e.g. live wires, sockets, devices)
+- Displays:
+  - Peak-to-peak signal
+  - RMS (signal energy)
+  - 50 Hz component (mains detection)
+  - 100 Hz harmonic
+  - DC offset (mean)
+  - Peak hold
+- Real-time bar visualization on the M5 display
+- Serial output for logging / plotting
+
+# How it works
+The jumper wire acts as a high-impedance antenna, picking up electric fields via capacitive coupling.
+
+The ESP32 ADC samples the signal and extracts features:
+
+- Peak-to-Peak: overall signal variation
+- RMS: signal energy
+- Goertzel algorithm: detects specific frequencies (50 Hz / 100 Hz)
+
+# Hardware
+- M5 Cardputer ADV (should work with other M5-ESP devices too..)
+- 1x jumper wire as antenna
+
+## Could be nice but I don't have either:
+- longer wire: stronger signal
+- metal probe: more stable readings
