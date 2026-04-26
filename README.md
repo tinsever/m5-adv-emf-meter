@@ -7,6 +7,7 @@ It detects ambient electrical fields, visualizes signal strength, and identifies
 
 # Quickstart
 a) Using Launcher: Download .bin from [Releases](https://github.com/tinsever/m5-adv-emf-meter/releases) to your Cardputer ADV
+
 b) Flashing: Using Arduino IDE and code in emf-meter.ino
 
 # What it does
