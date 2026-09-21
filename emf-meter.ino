@@ -1,179 +1,242 @@
-#include <M5Unified.h>
+#include <M5Cardputer.h>
+#include "meter_math.h"
 
-const int ADC_PIN = 3;
+constexpr int ADC_PIN = 3;
+constexpr float alpha = 0.15f;
+constexpr int ROW_COUNT = 5;
+constexpr int ROW_Y = 35;
+constexpr int ROW_STEP = 16;
+constexpr int BAR_X = 100;
+constexpr int BAR_Y_OFFSET = 1;
+constexpr int BAR_W = 135;
+constexpr int BAR_H = 11;
+constexpr int VALUE_X = 59;
+constexpr int VALUE_W = 36;
 
-const int SAMPLE_COUNT = 256;
-const float SAMPLE_RATE = 1000.0;
-const int SAMPLE_INTERVAL_US = 1000000 / SAMPLE_RATE;
-
-float smoothSignal = 0;
-float smoothRMS = 0;
-float smooth50Hz = 0;
-float smooth100Hz = 0;
-
-const float alpha = 0.15;
-
-const int MAX_SIGNAL = 2000;
-const int MAX_RMS = 800;
-const int MAX_HZ = 800;
-
+int mainsHz = 50;
+bool audioEnabled = false;
+bool audioFailed = false;
+bool previous50 = false, previous60 = false, previousAudio = false;
+float smoothSignal = 0, smoothRMS = 0, smoothFundamental = 0, smoothHarmonic = 0;
 int peakHold = 0;
-unsigned long lastPeakDecay = 0;
+uint32_t lastPeakDecay = 0, lastCue = 0;
+int samples[meter::sampleCount];
 
-int samples[SAMPLE_COUNT];
+// Small sprites replace each changed text field in one transfer; the complete
+// display is never cleared during normal measurements.
+M5Canvas textLine(&M5.Display);
+M5Canvas valueText(&M5.Display);
+M5Canvas labelText(&M5.Display);
+char previousValues[ROW_COUNT][12] = {};
+char previousStats[48] = {};
+char previousHeader[48] = {};
+int previousBarPixels[ROW_COUNT] = {};
 
-uint32_t getColor(float xRatio) {
-  int r, g;
-
-  if (xRatio < 0.5) {
-    r = int(255 * (xRatio * 2));
-    g = 255;
-  } else {
-    r = 255;
-    g = int(255 * (1 - (xRatio - 0.5) * 2));
-  }
-
+uint32_t getColor(float position) {
+  const float ratio = meter::ratio(position, 1.0f);
+  const int r = ratio < 0.5f ? int(510 * ratio) : 255;
+  const int g = ratio < 0.5f ? 255 : int(510 * (1 - ratio));
   return (r << 16) | (g << 8);
 }
 
-float goertzel(float targetFreq, float sampleRate, int *data, int count, float mean) {
-  float k = 0.5 + ((count * targetFreq) / sampleRate);
-  float omega = (2.0 * PI * k) / count;
-  float coeff = 2.0 * cos(omega);
-
-  float q0 = 0;
-  float q1 = 0;
-  float q2 = 0;
-
-  for (int i = 0; i < count; i++) {
-    float x = data[i] - mean;
-    q0 = coeff * q1 - q2 + x;
-    q2 = q1;
-    q1 = q0;
-  }
-
-  float power = q1 * q1 + q2 * q2 - coeff * q1 * q2;
-  return sqrt(power) / count;
+void drawLine(int y, const char* text, char* previous) {
+  if (strcmp(text, previous) == 0) return;
+  textLine.fillSprite(BLACK);
+  textLine.setCursor(0, 1);
+  textLine.print(text);
+  textLine.pushSprite(5, y);
+  strcpy(previous, text); // Both callers use buffers of the same size (48).
 }
 
-void drawBar(int x, int y, int w, int h, float value, float maxValue, const char *label) {
-  int barLength = int((value / maxValue) * w);
-  barLength = constrain(barLength, 0, w);
+void drawHeader() {
+  char text[48];
+  snprintf(text, sizeof(text), "G3 | %d/%dHz | Sound:%s", mainsHz, mainsHz * 2,
+           audioFailed ? "ERR" : (audioEnabled ? "ON" : "OFF"));
+  drawLine(4, text, previousHeader);
+}
 
-  M5.Display.drawRect(x, y, w, h, WHITE);
-
-  for (int i = 0; i < barLength; i += 3) {
-    float ratio = float(i) / float(w);
-    uint32_t color = getColor(ratio);
-    M5.Display.fillRect(x + i, y, 3, h, color);
+void drawFrequencyLabels() {
+  for (int i = 0; i < 2; ++i) {
+    labelText.fillSprite(BLACK);
+    labelText.setCursor(0, 1);
+    labelText.printf("%dHz", mainsHz * (i + 1));
+    labelText.pushSprite(5, ROW_Y + (i + 2) * ROW_STEP);
   }
+}
 
-  M5.Display.setTextColor(WHITE, BLACK);
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(x, y - 10);
-  M5.Display.printf("%s: %.0f", label, value);
+void updateBar(int row, float value, float maximum) {
+  char text[12];
+  snprintf(text, sizeof(text), "%.0f", value);
+  const int y = ROW_Y + row * ROW_STEP;
+  if (strcmp(text, previousValues[row]) != 0) {
+    valueText.fillSprite(BLACK);
+    valueText.setCursor(VALUE_W - strlen(text) * 6, 1);
+    valueText.print(text);
+    valueText.pushSprite(VALUE_X, y);
+    strcpy(previousValues[row], text);
+  }
+  const int innerW = BAR_W - 2;
+  const int length = meter::barPixels(value, maximum, innerW);
+  const int previous = previousBarPixels[row];
+  if (length == previous) return;
+  M5.Display.startWrite();
+  if (length < previous) {
+    M5.Display.fillRect(BAR_X + 1 + length, y + BAR_Y_OFFSET + 1,
+                        previous - length, BAR_H - 2, BLACK);
+  } else {
+    for (int i = previous; i < length; ++i) {
+      M5.Display.drawFastVLine(BAR_X + 1 + i, y + BAR_Y_OFFSET + 1,
+                              BAR_H - 2, getColor(float(i) / (innerW - 1)));
+    }
+  }
+  M5.Display.endWrite();
+  previousBarPixels[row] = length;
+}
+
+void printSerialHeader() {
+  // Keep the original five numeric CSV fields; identify them after mode changes.
+  Serial.printf("# P2P,RMS,%dHz,%dHz,Mean\n", mainsHz, mainsHz * 2);
+}
+
+void selectMains(int frequency) {
+  if (mainsHz == frequency) return;
+  mainsHz = frequency;
+  // Old-frequency amplitudes must not be carried into the new filter's display.
+  smoothFundamental = smoothHarmonic = 0;
+  updateBar(2, 0, meter::maxHz);
+  updateBar(3, 0, meter::maxHz);
+  drawFrequencyLabels();
+  drawHeader();
+  printSerialHeader();
+}
+
+void pollControls() {
+  M5Cardputer.update();
+  const bool key50 = M5Cardputer.Keyboard.isKeyPressed('5');
+  const bool key60 = M5Cardputer.Keyboard.isKeyPressed('6');
+  const bool keyAudio = M5Cardputer.Keyboard.isKeyPressed('a') || M5Cardputer.Keyboard.isKeyPressed('A');
+  if (key50 && !previous50) selectMains(50);
+  if (key60 && !previous60) selectMains(60);
+  if (keyAudio && !previousAudio) {
+    audioEnabled = !audioEnabled;
+    audioFailed = false;
+    drawHeader();
+  }
+  previous50 = key50;
+  previous60 = key60;
+  previousAudio = keyAudio;
+}
+
+void serviceAudio() {
+  const auto cue = meter::audioCue(smoothRMS);
+  if (!audioEnabled || !cue.audible || millis() - lastCue < cue.intervalMs) return;
+  lastCue = millis();
+  if (!M5.Speaker.begin() || !M5.Speaker.tone(cue.frequency, 25)) {
+    audioEnabled = false;
+    audioFailed = true;
+    M5.Speaker.end();
+    drawHeader();
+    return;
+  }
+  const uint32_t started = millis();
+  while (audioEnabled && M5.Speaker.isPlaying() && millis() - started < 150) {
+    pollControls();
+    delay(1);
+  }
+  // Stop I2S playback before acquiring the next block. A floating ADC
+  // antenna can otherwise pick up the device's own speaker and clock signals.
+  M5.Speaker.end();
+  delay(10);
 }
 
 void setup() {
   auto cfg = M5.config();
-  M5.begin(cfg);
-
+  cfg.internal_spk = true;
+  cfg.internal_mic = false;
+  M5Cardputer.begin(cfg, true);
+  M5.Speaker.setVolume(48);
+  M5.Speaker.end();
   Serial.begin(115200);
-
   analogReadResolution(12);
   analogSetPinAttenuation(ADC_PIN, ADC_11db);
-
+  M5.Display.setRotation(1);
+  M5.Display.setFont(&fonts::Font0);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WHITE, BLACK);
+  M5.Display.setTextWrap(false);
   M5.Display.fillScreen(BLACK);
+
+  textLine.setColorDepth(16);
+  valueText.setColorDepth(16);
+  labelText.setColorDepth(16);
+  if (!textLine.createSprite(230, 12) || !valueText.createSprite(VALUE_W, 12)
+      || !labelText.createSprite(52, 12)) {
+    M5.Display.setCursor(5, 5);
+    M5.Display.print("Display buffer allocation failed");
+    while (true) delay(1000);
+  }
+  for (M5Canvas* canvas : {&textLine, &valueText, &labelText}) {
+    canvas->setFont(&fonts::Font0);
+    canvas->setTextSize(1);
+    canvas->setTextColor(WHITE, BLACK);
+    canvas->setTextWrap(false);
+  }
+  const char* labels[] = {"P2P", "RMS", "", "", "Peak"};
+  for (int row = 0; row < ROW_COUNT; ++row) {
+    const int y = ROW_Y + row * ROW_STEP;
+    M5.Display.setCursor(5, y + 1);
+    M5.Display.print(labels[row]);
+    M5.Display.drawRect(BAR_X, y + BAR_Y_OFFSET, BAR_W, BAR_H, WHITE);
+  }
+  M5.Display.setCursor(5, 123);
+  M5.Display.print("5:50Hz  6:60Hz  A:sound");
+  drawFrequencyLabels();
+  drawHeader();
+  printSerialHeader();
+  lastPeakDecay = millis();
 }
 
 void loop() {
-  M5.update();
-
-  int screenWidth = M5.Display.width();
-  int screenHeight = M5.Display.height();
-
-  int minVal = 4095;
-  int maxVal = 0;
-  long sum = 0;
-
-  unsigned long nextSample = micros();
-
-  for (int i = 0; i < SAMPLE_COUNT; i++) {
-    while (micros() < nextSample) {
-      // exakt warten
-    }
-
-    int v = analogRead(ADC_PIN);
-    samples[i] = v;
-
-    if (v < minVal) minVal = v;
-    if (v > maxVal) maxVal = v;
-
-    sum += v;
-    nextSample += SAMPLE_INTERVAL_US;
+  // Drain queued key events outside acquisition, including quick press/release
+  // pairs collected during the previous 200 ms block.
+  for (int i = 0; i < 12; ++i) {
+    pollControls();
+    delay(1);
   }
 
-  float mean = float(sum) / SAMPLE_COUNT;
-
-  float sqSum = 0;
-  for (int i = 0; i < SAMPLE_COUNT; i++) {
-    float centered = samples[i] - mean;
-    sqSum += centered * centered;
+  uint32_t nextSample = micros();
+  bool timingValid = true;
+  for (int i = 0; i < meter::sampleCount; ++i) {
+    while (!meter::deadlineReached(micros(), nextSample)) {}
+    if (micros() - nextSample >= meter::sampleIntervalUs) timingValid = false;
+    samples[i] = analogRead(ADC_PIN);
+    nextSample += meter::sampleIntervalUs;
   }
+  // Do not report frequencies from a window with missed sample deadlines.
+  if (!timingValid) return;
+  const auto reading = meter::analyze(samples, meter::sampleCount, meter::sampleRate, mainsHz);
+  smoothSignal += alpha * (reading.peakToPeak - smoothSignal);
+  smoothRMS += alpha * (reading.rms - smoothRMS);
+  smoothFundamental += alpha * (reading.fundamental - smoothFundamental);
+  smoothHarmonic += alpha * (reading.harmonic - smoothHarmonic);
 
-  float rms = sqrt(sqSum / SAMPLE_COUNT);
-  int peakToPeak = maxVal - minVal;
-
-  float hz50 = goertzel(50.0, SAMPLE_RATE, samples, SAMPLE_COUNT, mean);
-  float hz100 = goertzel(100.0, SAMPLE_RATE, samples, SAMPLE_COUNT, mean);
-
-  smoothSignal = alpha * peakToPeak + (1.0 - alpha) * smoothSignal;
-  smoothRMS = alpha * rms + (1.0 - alpha) * smoothRMS;
-  smooth50Hz = alpha * hz50 + (1.0 - alpha) * smooth50Hz;
-  smooth100Hz = alpha * hz100 + (1.0 - alpha) * smooth100Hz;
-
-  if (smoothSignal > peakHold) {
-    peakHold = smoothSignal;
+  const uint32_t decaySteps = (millis() - lastPeakDecay) / 120;
+  if (decaySteps) {
+    const uint32_t decay = decaySteps * 5;
+    peakHold = decay >= uint32_t(peakHold) ? 0 : peakHold - decay;
+    lastPeakDecay += decaySteps * 120;
   }
+  if (smoothSignal > peakHold) peakHold = int(smoothSignal);
 
-  if (millis() - lastPeakDecay > 120) {
-    if (peakHold > 0) peakHold -= 5;
-    lastPeakDecay = millis();
-  }
-
-  M5.Display.fillScreen(BLACK);
-
-  M5.Display.setTextSize(1);
-  M5.Display.setTextColor(WHITE, BLACK);
-
-  M5.Display.setCursor(5, 5);
-  M5.Display.printf("ADC pin: %d", ADC_PIN);
-
-  M5.Display.setCursor(5, 18);
-  M5.Display.printf("Mean/DC: %.1f", mean);
-
-  M5.Display.setCursor(5, 31);
-  M5.Display.printf("Min:%d Max:%d P2P:%d", minVal, maxVal, peakToPeak);
-
-  int barW = screenWidth - 10;
-  int x = 5;
-
-  drawBar(x, 55,  barW, 12, smoothSignal, MAX_SIGNAL, "Signal/P2P");
-  drawBar(x, 85,  barW, 12, smoothRMS,    MAX_RMS,    "RMS");
-  drawBar(x, 115, barW, 12, smooth50Hz,   MAX_HZ,     "50Hz");
-  drawBar(x, 145, barW, 12, smooth100Hz,  MAX_HZ,     "100Hz");
-  drawBar(x, 175, barW, 12, peakHold,     MAX_SIGNAL, "Peak Hold");
-
-  M5.Display.setCursor(5, screenHeight - 15);
-  M5.Display.printf("Serial: P2P,RMS,50Hz,100Hz,Mean");
-
-  Serial.print(smoothSignal);
-  Serial.print(",");
-  Serial.print(smoothRMS);
-  Serial.print(",");
-  Serial.print(smooth50Hz);
-  Serial.print(",");
-  Serial.print(smooth100Hz);
-  Serial.print(",");
-  Serial.println(mean);
+  char text[48];
+  snprintf(text, sizeof(text), "DC:%.1f Min:%d Max:%d", reading.mean, reading.minimum, reading.maximum);
+  drawLine(19, text, previousStats);
+  updateBar(0, smoothSignal, meter::maxSignal);
+  updateBar(1, smoothRMS, meter::maxRms);
+  updateBar(2, smoothFundamental, meter::maxHz);
+  updateBar(3, smoothHarmonic, meter::maxHz);
+  updateBar(4, peakHold, meter::maxSignal);
+  Serial.printf("%.2f,%.2f,%.2f,%.2f,%.2f\n", smoothSignal, smoothRMS,
+                smoothFundamental, smoothHarmonic, reading.mean);
+  serviceAudio();
 }
